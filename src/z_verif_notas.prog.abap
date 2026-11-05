@@ -1,4 +1,10 @@
 *&---------------------------------------------------------------------*
+*& Report ZVERIF_NOTAS
+*&---------------------------------------------------------------------*
+*&
+*&---------------------------------------------------------------------*
+REPORT zverif_notas.
+*&---------------------------------------------------------------------*
 *& Report Z_VERIF_NOTAS
 *&---------------------------------------------------------------------*
 *& Título     : Verificação de Notas SAP e da sua cadeia de pré-requisitos
@@ -101,7 +107,6 @@
 *&                layout gravável no ALV; S_NOTA obrigatório; ajustes
 *&                de documentação e novo teste unitário.
 *&---------------------------------------------------------------------*
-REPORT z_verif_notas.
 
 *----------------------------------------------------------------------*
 * Objetos globais
@@ -112,12 +117,12 @@ DATA gv_sel_nota TYPE cwbntnumm.
 *----------------------------------------------------------------------*
 * Tela de seleção
 *----------------------------------------------------------------------*
-SELECTION-SCREEN BEGIN OF BLOCK b01 WITH FRAME TITLE TEXT-b01.
-SELECT-OPTIONS s_nota FOR gv_sel_nota.
+SELECTION-SCREEN BEGIN OF BLOCK b01 WITH FRAME TITLE TEXT-b01. " Consulta de notas
+  SELECT-OPTIONS s_nota FOR gv_sel_nota. " Notas
 SELECTION-SCREEN END OF BLOCK b01.
 
-SELECTION-SCREEN BEGIN OF BLOCK b02 WITH FRAME TITLE TEXT-b02.
-PARAMETERS p_ocimp AS CHECKBOX DEFAULT abap_false.
+SELECTION-SCREEN BEGIN OF BLOCK b02 WITH FRAME TITLE TEXT-b02. " Filtro de notas
+  PARAMETERS p_ocimp AS CHECKBOX DEFAULT abap_false. " Ocultar notas concluídas
 SELECTION-SCREEN END OF BLOCK b02.
 
 *----------------------------------------------------------------------*
@@ -466,6 +471,12 @@ CLASS lcl_repositorio_notas_sap IMPLEMENTATION.
 
   METHOD lif_repositorio_notas~buscar_prerequisitos.
 
+    cl_progress_indicator=>progress_indicate(
+      EXPORTING
+        i_text               = |Buscando pré-requisitos...|
+        i_output_immediately = abap_true
+    ).
+
     CALL FUNCTION 'SCWB_CINST_PRECONDITION_DATA'
       EXPORTING
         iv_notenum                 = iv_nota
@@ -564,10 +575,53 @@ CLASS lcl_exibidor_alv IMPLEMENTATION.
 
   METHOD lif_exibidor_notas~exibir.
 
-    DATA lo_alv TYPE REF TO cl_salv_table.
+    DATA lo_alv  TYPE REF TO cl_salv_table.
+
+    " Variáveis para quantidade de linhas
+    DATA: lo_grid        TYPE REF TO cl_salv_form_layout_grid,
+          lv_linhas_tot  TYPE i,
+          lv_linhas_prin TYPE i,
+          lv_linhas_pre  TYPE i,
+          lv_qtd_total   TYPE string,
+          lv_qtd_princ   TYPE string,
+          lv_qtd_pre     TYPE string.
+
+    DATA: lv_count TYPE i,
+          lv_total TYPE i.
 
     mt_saida = it_saida.
+    DATA(mt_saida_temp) = it_saida.
 
+* Quantidade total de notas
+    lv_linhas_tot = lines( mt_saida_temp ).
+
+    lv_qtd_total = |Número total de notas: { lv_linhas_tot }|.
+    CLEAR lv_linhas_tot.
+
+    DESCRIBE TABLE mt_saida_temp LINES lv_total.
+* Contagem de notas principais e pré-requisitos
+    LOOP AT mt_saida_temp INTO DATA(ls_temp).
+      ADD 1 TO lv_count.
+
+      CALL FUNCTION 'SAPGUI_PROGRESS_INDICATOR'
+        EXPORTING
+          percentage = ( lv_count * 100 ) / lv_total
+          text       = |Contagem total de notas: { lv_count } de { lv_total }...|.
+
+      IF ls_temp-t_color IS NOT INITIAL.
+        ADD 1 TO lv_linhas_prin.
+      ELSE.
+        ADD 1 TO lv_linhas_pre.
+      ENDIF.
+    ENDLOOP.
+
+    lv_qtd_princ = |Notas principais: { lv_linhas_prin }|.
+    CLEAR lv_linhas_prin.
+
+    lv_qtd_pre = |Notas pré-requisito: { lv_linhas_pre }|.
+    CLEAR lv_linhas_pre.
+
+* Criação do ALV
     TRY.
         cl_salv_table=>factory(
           IMPORTING
@@ -578,6 +632,41 @@ CLASS lcl_exibidor_alv IMPLEMENTATION.
         MESSAGE lx_msg TYPE 'S' DISPLAY LIKE 'E'.
         RETURN.
     ENDTRY.
+
+* Instancia o objeto de layout (Grid) para o cabeçalho
+    CREATE OBJECT lo_grid.
+
+* Adiciona o Título Principal
+    lo_grid->create_header_information(
+      row    = 1
+      column = 1
+      text   = 'Relatório de Notas'
+    ).
+
+* Adiciona o texto com a contagem de linhas
+    " Qtd total de notas
+    lo_grid->create_text(
+      row    = 2
+      column = 1
+      text   = lv_qtd_total
+    ).
+
+    " Qtd de notas principais
+    lo_grid->create_text(
+      row    = 3
+      column = 1
+      text   = lv_qtd_princ
+    ).
+
+    " Qtd de notas pré-requisito
+    lo_grid->create_text(
+      row    = 4
+      column = 1
+      text   = lv_qtd_pre
+    ).
+
+    " Atribui o objeto grid como cabeçalho do ALV (Top of List)
+    lo_alv->set_top_of_list( lo_grid ).
 
     lo_alv->get_functions( )->set_all( abap_true ).
 
@@ -1028,6 +1117,8 @@ CLASS lcl_verificador_notas IMPLEMENTATION.
   METHOD processar_nota.
 
     DATA(ls_nota_principal) = ler_nota_principal( iv_nota ).
+    DATA: lv_count TYPE i,
+          lv_total TYPE i.
 
     " Nota não carregada: sem instruções de correção não há árvore a
     " determinar (e a busca poderia disparar o download da nota).
@@ -1044,9 +1135,18 @@ CLASS lcl_verificador_notas IMPLEMENTATION.
                         it_prereq = mo_repositorio->buscar_prerequisitos( iv_nota )
                         iv_nota   = iv_nota ).
 
+    DESCRIBE TABLE lt_prereq LINES lv_total.
+
     LOOP AT lt_prereq ASSIGNING FIELD-SYMBOL(<ls_prereq>).
       DATA(ls_linha) = ler_dados_nota( iv_nota           = <ls_prereq>-numm
                                        iv_nota_principal = iv_nota ).
+      ADD 1 TO lv_count.
+
+      CALL FUNCTION 'SAPGUI_PROGRESS_INDICATOR'
+        EXPORTING
+          percentage = ( lv_count * 100 ) / lv_total
+          text       = |Processando pré-requisitos: { lv_count } de { lv_total }...|.
+
       IF deve_ocultar( ls_linha ) = abap_false.
         APPEND ls_linha TO rt_saida.
       ENDIF.
@@ -1119,6 +1219,11 @@ CLASS lcl_verificador_notas IMPLEMENTATION.
 
     WHILE lv_pai IS NOT INITIAL AND rv_profundidade < lv_limite.
 
+      CALL FUNCTION 'SAPGUI_PROGRESS_INDICATOR'
+        EXPORTING
+          percentage = ( rv_profundidade * 100 ) / lv_limite
+          text       = |Calculando produndidade das notas: { rv_profundidade } de { lv_limite }...|.
+
       READ TABLE it_por_aleid ASSIGNING FIELD-SYMBOL(<ls_pai>)
            WITH TABLE KEY aleid = lv_pai.
       IF sy-subrc <> 0.
@@ -1138,7 +1243,17 @@ CLASS lcl_verificador_notas IMPLEMENTATION.
     DATA lt_vistas TYPE HASHED TABLE OF cwb_note_display-numm
                    WITH UNIQUE KEY table_line.
 
+    DATA: lv_count TYPE i,
+          lv_total TYPE i.
+
+    DESCRIBE TABLE it_prereq LINES lv_total.
+
     LOOP AT it_prereq ASSIGNING FIELD-SYMBOL(<ls_nota>).
+      CALL FUNCTION 'SAPGUI_PROGRESS_INDICATOR'
+        EXPORTING
+          percentage = ( lv_count * 100 ) / lv_total
+          text       = |Removendo duplicatas: { lv_count } de { lv_total }...|.
+
       INSERT <ls_nota>-numm INTO TABLE lt_vistas.
       IF sy-subrc = 0.
         APPEND <ls_nota> TO rt_prereq.
@@ -1150,6 +1265,9 @@ CLASS lcl_verificador_notas IMPLEMENTATION.
 
   METHOD remover_repetidas_saida.
 
+    DATA: lv_count TYPE i,
+          lv_total TYPE i.
+
     TYPES:
       BEGIN OF lty_s_indice,
         numm  TYPE lif_verificador_notas=>ty_s_saida-numm,
@@ -1158,7 +1276,15 @@ CLASS lcl_verificador_notas IMPLEMENTATION.
 
     DATA lt_indice TYPE HASHED TABLE OF lty_s_indice WITH UNIQUE KEY numm.
 
+    DESCRIBE TABLE it_saida LINES lv_total.
+
     LOOP AT it_saida ASSIGNING FIELD-SYMBOL(<ls_saida>).
+      ADD 1 TO lv_count.
+
+      CALL FUNCTION 'SAPGUI_PROGRESS_INDICATOR'
+        EXPORTING
+          percentage = ( lv_count * 100 ) / lv_total
+          text       = |Tratamento de sáída: { lv_count } de { lv_total }...|.
 
       READ TABLE lt_indice ASSIGNING FIELD-SYMBOL(<ls_indice>)
            WITH TABLE KEY numm = <ls_saida>-numm.
@@ -1183,10 +1309,19 @@ CLASS lcl_verificador_notas IMPLEMENTATION.
   METHOD preencher_ativ_manuais.
 
     DATA ls_ativ TYPE lif_repositorio_notas=>ty_s_ativ_manuais.
+    DATA: lv_count TYPE i,
+          lv_total TYPE i.
 
+    DESCRIBE TABLE ct_saida LINES lv_total.
     " A tabela final não possui NUMM repetido: cada nota é avaliada
     " uma única vez
     LOOP AT ct_saida ASSIGNING FIELD-SYMBOL(<ls_saida>).
+      ADD 1 TO lv_count.
+
+      CALL FUNCTION 'SAPGUI_PROGRESS_INDICATOR'
+        EXPORTING
+          percentage = ( lv_count * 100 ) / lv_total
+          text       = |Preenchimento de passos manuais: { lv_count } de { lv_total }...|.
 
       " Nota não carregada: sem instruções de correção a avaliar
       IF esta_carregada( <ls_saida> ) = abap_false.
@@ -1276,7 +1411,7 @@ START-OF-SELECTION.
 *----------------------------------------------------------------------*
 * Dublê LTD_REPOSITORIO_NOTAS
 *----------------------------------------------------------------------*
-"! Repositório em memória: substitui CWBNTHEAD e os FMs da SNOTE.
+  "! Repositório em memória: substitui CWBNTHEAD e os FMs da SNOTE.
 CLASS ltd_repositorio_notas DEFINITION FINAL FOR TESTING.
 
   PUBLIC SECTION.
